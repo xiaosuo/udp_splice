@@ -1,0 +1,10 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: libudp_splice
+Description: Splice two UDP sockets.
+Version: @VERSION@
+Libs: -L${libdir} -ludp_splice -lpthread
+Cflags: -I${includedir}

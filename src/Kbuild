@@ -1,0 +1,3 @@
+obj-m := udp_splice.o
+
+ccflags-y := -I$(src)/../include
