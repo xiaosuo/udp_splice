@@ -6,5 +6,6 @@ includedir=@includedir@
 Name: libudp_splice
 Description: Splice two UDP sockets.
 Version: @VERSION@
-Libs: -L${libdir} -ludp_splice -lpthread
+Libs: -L${libdir} -ludp_splice
+Libs.private: -lpthread
 Cflags: -I${includedir}
