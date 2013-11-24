@@ -644,11 +644,11 @@ static unsigned int udp_splice_hook(
 				ep->tuple.raddr, 1);
 		inet_proto_csum_replace2(&udph->check, skb, udph->source,
 				ep->tuple.lport, 0);
-		udph->source = ep->tuple.lport;
 		inet_proto_csum_replace2(&udph->check, skb, udph->dest,
 				ep->tuple.rport, 0);
-		udph->dest = ep->tuple.rport;
 	}
+	udph->source = ep->tuple.lport;
+	udph->dest = ep->tuple.rport;
 	csum_replace4(&iph->check, iph->saddr, ep->tuple.laddr);
 	iph->saddr = ep->tuple.laddr;
 	csum_replace4(&iph->check, iph->daddr, ep->tuple.raddr);
