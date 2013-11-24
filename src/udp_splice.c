@@ -1035,7 +1035,8 @@ err3:
 	mutex_unlock(&udp_splice_register_lock);
 	flush_work(&udp_splice_register_hook_work);
 err2:
-	vfree(udp_splice_hash_table);
+	udp_splice_free_hash_table(udp_splice_hash_table,
+			udp_splice_hash_table_size);
 err:
 	return retval;
 }
