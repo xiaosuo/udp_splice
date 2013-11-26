@@ -4,19 +4,16 @@ libudp_splice_la_SOURCES = libudp_splice.c
 libudp_splice_la_LIBADD = -lpthread
 libudp_splice_la_LDFLAGS = -version-info 0:0:0
 
-# TODO: use autoconf
-KDIR ?= /lib/modules/`uname -r`/build
-
 .PHONY: modules modules_install modules_clean
 
 modules:
-	$(MAKE) -C $(KDIR) M=${abs_srcdir} $@
+	if test -n "$(kbuilddir)"; then $(MAKE) -C $(kbuilddir) M=${abs_srcdir} $@; fi
 
 modules_install:
-	$(MAKE) -C $(KDIR) M=${abs_srcdir} INSTALL_MOD_PATH=${DESTDIR} $@
+	if test -n "$(kbuilddir)"; then $(MAKE) -C $(kbuilddir) M=${abs_srcdir} INSTALL_MOD_PATH=${DESTDIR} $@; fi
 
 modules_clean:
-	$(MAKE) -C $(KDIR) M=${abs_srcdir} clean
+	if test -n "$(kbuilddir)"; then $(MAKE) -C $(kbuilddir) M=${abs_srcdir} clean; fi
 
 all-local: modules
 

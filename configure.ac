@@ -20,6 +20,15 @@ m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
 LT_INIT
 
 # Checks for libraries.
+AC_ARG_WITH([kbuild],
+		AS_HELP_STRING([--with-kbuild=PATH], [PATH to kernel build directory [default="/lib/modules/$(uname -r)/build"]])
+AS_HELP_STRING([--without-kbuild], [Build only library]),
+		[kbuilddir="$withval"],
+		[kbuilddir="/lib/modules/$(uname -r)/build"])
+if test "$kbuilddir" = no; then
+	kbuilddir="";
+fi
+AC_SUBST(kbuilddir)
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h netinet/in.h stdint.h stdlib.h string.h sys/socket.h unistd.h])
@@ -52,6 +61,7 @@ AC_MSG_RESULT([
 	datarootdir:			${datarootdir}
 	docdir:				${docdir}
 	includedir:			${includedir}
+	kbuilddir:			${kbuilddir}
 
 	CC:				${CC}
 	CFLAGS:				${CFLAGS}
