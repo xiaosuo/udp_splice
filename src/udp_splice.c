@@ -54,7 +54,7 @@ struct udp_splice_ep {
 	spinlock_t		lock;
 	u64			rx_packets;
 	u64			rx_bytes;
-	struct hlist_node	node;
+	struct rb_node		node;
 };
 
 struct udp_splice_entry {
@@ -68,14 +68,14 @@ struct udp_splice_entry {
 };
 
 static DEFINE_SPINLOCK(udp_splice_hash_table_lock);
-static struct hlist_head	*udp_splice_hash_table;
+static struct rb_root	*udp_splice_hash_table;
 
-static unsigned int		udp_splice_hash_table_size;
+static unsigned int	udp_splice_hash_table_size;
 
-static struct hlist_head *udp_splice_alloc_hash_table(unsigned int *psize)
+static struct rb_root *udp_splice_alloc_hash_table(unsigned int *psize)
 {
 	unsigned long size;
-	struct hlist_head *hash_table;
+	struct rb_root *hash_table;
 
 	*psize = roundup(*psize, PAGE_SIZE / sizeof(*hash_table));
 	size = (*psize) * sizeof(*hash_table);
@@ -89,7 +89,7 @@ static struct hlist_head *udp_splice_alloc_hash_table(unsigned int *psize)
 	return hash_table;
 }
 
-static void udp_splice_free_hash_table(struct hlist_head *hash_table,
+static void udp_splice_free_hash_table(struct rb_root *hash_table,
 		unsigned int size)
 {
 	if (is_vmalloc_addr(hash_table))
@@ -117,15 +117,68 @@ static inline unsigned int udp_splice_hash(const struct udp_splice_tuple *tuple)
 			tuple->rport);
 }
 
+static inline int udp_splice_cmp_tuple(const struct udp_splice_tuple *tuple,
+		const struct udp_splice_tuple *tuple2)
+{
+	return memcmp(tuple, tuple2, sizeof(*tuple));
+}
+
+static void ____udp_splice_insert_ep(struct udp_splice_ep *ep,
+		unsigned int hash, struct rb_root *hash_table,
+		unsigned int hash_table_size)
+{
+	struct rb_node **new, *parent = NULL;
+	struct rb_root *root;
+
+	root = &hash_table[hash % hash_table_size];
+	new = &root->rb_node;
+	while (*new) {
+		struct udp_splice_ep *this;
+		int rc;
+
+		parent = *new;
+		this = rb_entry(parent, struct udp_splice_ep, node);
+		rc = udp_splice_cmp_tuple(&ep->tuple, &this->tuple);
+		if (rc < 0)
+			new = &parent->rb_left;
+		else if (rc > 0)
+			new = &parent->rb_right;
+		else
+			BUG_ON(true);
+	}
+
+	rb_link_node(&ep->node, parent, new);
+	rb_insert_color(&ep->node, root);
+}
+
+static void __udp_splice_insert_ep(struct udp_splice_ep *ep, unsigned int hash)
+{
+	return ____udp_splice_insert_ep(ep, hash, udp_splice_hash_table,
+			udp_splice_hash_table_size);
+}
+
+static void udp_splice_insert_ep(struct udp_splice_ep *ep,
+		struct rb_root *hash_table, unsigned int hash_table_size)
+{
+	____udp_splice_insert_ep(ep, udp_splice_hash(&ep->tuple),
+			hash_table, hash_table_size);
+}
+
+static inline void __udp_splice_unlink_entry(struct udp_splice_entry *entry)
+{
+	rb_erase(&entry->ep[0].node, &udp_splice_hash_table[udp_splice_hash(&entry->ep[0].tuple) % udp_splice_hash_table_size]);
+	rb_erase(&entry->ep[1].node, &udp_splice_hash_table[udp_splice_hash(&entry->ep[1].tuple) % udp_splice_hash_table_size]);
+}
+
 static int udp_splice_set_hash_table_size(const char *val,
 		struct kernel_param *kp)
 {
 	unsigned int hash_table_size, i;
-	struct hlist_head *hash_table;
+	struct rb_root *hash_table;
 	int retval;
 	struct udp_splice_ep *ep;
 	struct udp_splice_entry *entry;
-	struct hlist_node *node;
+	struct rb_node *node;
 
 	if (!net_eq(current->nsproxy->net_ns, &init_net))
 		return -EOPNOTSUPP;
@@ -144,16 +197,15 @@ static int udp_splice_set_hash_table_size(const char *val,
 	spin_lock_bh(&udp_splice_hash_table_lock);
 	if (hash_table_size != udp_splice_hash_table_size) {
 		for (i = 0; i < udp_splice_hash_table_size; i++) {
-			while ((node = udp_splice_hash_table[i].first)) {
-				ep = hlist_entry(node, struct udp_splice_ep,
+			while ((node = udp_splice_hash_table[i].rb_node)) {
+				ep = rb_entry(node, struct udp_splice_ep,
 						node);
 				entry = udp_splice_ep2entry(ep);
-				hlist_del(&entry->ep[0].node);
-				hlist_add_head(&entry->ep[0].node,
-						&hash_table[udp_splice_hash(&entry->ep[0].tuple) % hash_table_size]);
-				hlist_del(&entry->ep[1].node);
-				hlist_add_head(&entry->ep[1].node,
-						&hash_table[udp_splice_hash(&entry->ep[1].tuple) % hash_table_size]);
+				__udp_splice_unlink_entry(entry);
+				udp_splice_insert_ep(&entry->ep[0], hash_table,
+						hash_table_size);
+				udp_splice_insert_ep(&entry->ep[1], hash_table,
+						hash_table_size);
 			}
 		}
 		swap(hash_table, udp_splice_hash_table);
@@ -200,26 +252,41 @@ MODULE_PARM_DESC(default_timeout,
 
 static struct nf_hook_ops udp_splice_hook_ops __read_mostly;
 
-static struct udp_splice_ep *____udp_splice_find_ep(unsigned int hash,
-		__be32 laddr, __be32 raddr, __be16 lport, __be16 rport)
+static struct udp_splice_ep *__udp_splice_find_ep(unsigned int hash,
+		const struct udp_splice_tuple *tuple)
 {
 	struct udp_splice_ep *ep;
+	struct rb_root *root;
+	struct rb_node *node;
+	int rc;
 
-	hash %= udp_splice_hash_table_size;
-	hlist_for_each_entry(ep, &udp_splice_hash_table[hash], node) {
-		if (ep->tuple.laddr == laddr && ep->tuple.raddr == raddr &&
-		    ep->tuple.lport == lport && ep->tuple.rport == rport)
+	root = &udp_splice_hash_table[hash % udp_splice_hash_table_size];
+	node = root->rb_node;
+	while (node) {
+		ep = rb_entry(node, struct udp_splice_ep, node);
+		rc = udp_splice_cmp_tuple(tuple, &ep->tuple);
+		if (rc < 0)
+			node = node->rb_left;
+		else if (rc > 0)
+			node = node->rb_right;
+		else
 			return ep;
 	}
 
 	return NULL;
 }
 
-static struct udp_splice_ep *__udp_splice_find_ep(unsigned int hash,
-		const struct udp_splice_tuple *tuple)
+static struct udp_splice_ep *____udp_splice_find_ep(unsigned int hash,
+		__be32 laddr, __be32 raddr, __be16 lport, __be16 rport)
 {
-	return ____udp_splice_find_ep(hash, tuple->laddr, tuple->raddr,
-			tuple->lport, tuple->rport);
+	struct udp_splice_tuple tuple = {
+		.laddr	= laddr,
+		.raddr	= raddr,
+		.lport	= lport,
+		.rport	= rport,
+	};
+
+	return __udp_splice_find_ep(hash, &tuple);
 }
 
 static struct udp_splice_entry *udp_splice_find_entry(__be32 laddr,
@@ -342,12 +409,6 @@ err:
 	return retval;
 }
 
-static inline void __udp_splice_unlink_entry(struct udp_splice_entry *entry)
-{
-	hlist_del(&entry->ep[0].node);
-	hlist_del(&entry->ep[1].node);
-}
-
 static inline void udp_splice_unlink_entry(struct udp_splice_entry *entry)
 {
 	spin_lock_bh(&udp_splice_hash_table_lock);
@@ -435,10 +496,8 @@ static int udp_splice_cmd_add(struct sk_buff *skb, struct genl_info *info)
 		goto err2;
 	}
 	atomic_set(&entry->ref, 1);
-	hlist_add_head(&entry->ep[0].node,
-			&udp_splice_hash_table[hash % udp_splice_hash_table_size]);
-	hlist_add_head(&entry->ep[1].node,
-			&udp_splice_hash_table[hash2 % udp_splice_hash_table_size]);
+	__udp_splice_insert_ep(&entry->ep[0], hash);
+	__udp_splice_insert_ep(&entry->ep[1], hash2);
 	entry->last_used = jiffies;
 	entry->timer.expires = entry->last_used + entry->timeout;
 	add_timer(&entry->timer);
@@ -718,17 +777,18 @@ static struct nf_hook_ops udp_splice_hook_ops __read_mostly = {
 
 #ifdef CONFIG_PROC_FS
 struct udp_splice_seq_iter {
-	unsigned int		bucket;
-	struct hlist_node	*node;
+	unsigned int	bucket;
+	struct rb_node	*node;
 };
 
 static void *__udp_splice_seq_start(struct seq_file *seq, loff_t off)
 {
 	unsigned int bucket;
-	struct hlist_node *node;
+	struct rb_node *node;
 
 	for (bucket = 0; bucket < udp_splice_hash_table_size; bucket++) {
-		hlist_for_each(node, &udp_splice_hash_table[bucket]) {
+		for (node = rb_first(&udp_splice_hash_table[bucket]);
+				node; node = rb_next(node)) {
 			if (--off == 0) {
 				struct udp_splice_seq_iter *iter;
 
@@ -762,13 +822,13 @@ static void *udp_splice_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	if (v == SEQ_START_TOKEN)
 		return __udp_splice_seq_start(seq, *pos);
 	iter = (struct udp_splice_seq_iter *)v;
-	if (iter->node->next) {
-		iter->node = iter->node->next;
+	iter->node = rb_next(iter->node);
+	if (iter->node)
 		return iter;
-	}
 	for (iter->bucket++; iter->bucket < udp_splice_hash_table_size;
 			iter->bucket++) {
-		hlist_for_each(iter->node, &udp_splice_hash_table[iter->bucket])
+		iter->node = rb_first(&udp_splice_hash_table[iter->bucket]);
+		if (iter->node)
 			return iter;
 	}
 	kfree(iter);
@@ -791,7 +851,7 @@ static int udp_splice_seq_show(struct seq_file *seq, void *v)
 				"laddr:lport\traddr:rport\tpackets\tbytes\n");
 	} else {
 		struct udp_splice_seq_iter *iter = v;
-		struct udp_splice_ep *ep = hlist_entry(iter->node,
+		struct udp_splice_ep *ep = rb_entry(iter->node,
 				struct udp_splice_ep, node);
 		struct udp_splice_entry *entry;
 		unsigned long timeout, curr;
@@ -893,7 +953,7 @@ static struct pernet_operations udp_splice_net_ops = {
 
 static void udp_splice_flush_entries(int portid)
 {
-	struct hlist_node *node, *next;
+	struct rb_node *node, *next;
 	struct udp_splice_ep *ep;
 	struct udp_splice_entry *entry;
 	unsigned int i;
@@ -903,15 +963,16 @@ static void udp_splice_flush_entries(int portid)
 	table_size = udp_splice_hash_table_size;
 	for (i = 0; i < table_size; i++) {
 begin:
-		for (node = udp_splice_hash_table[i].first; node; node = next) {
-			next = node->next;
-			ep = hlist_entry(node, struct udp_splice_ep, node);
+		for (node = rb_first(&udp_splice_hash_table[i]); node;
+				node = next) {
+			next = rb_next(node);
+			ep = rb_entry(node, struct udp_splice_ep, node);
 			entry = udp_splice_ep2entry(ep);
 			if (portid && portid != entry->portid)
 				continue;
 			if (del_timer(&entry->timer)) {
 				if (next == &entry->ep[!ep->idx].node)
-					next = next->next;
+					next = rb_next(next);
 				__udp_splice_unlink_entry(entry);
 				udp_splice_put_entry(entry);
 				continue;
@@ -929,7 +990,7 @@ begin:
 				i = 0;
 				goto begin;
 			} else {
-				next = udp_splice_hash_table[i].first;
+				next = rb_first(&udp_splice_hash_table[i]);
 			}
 		}
 	}
