@@ -44,8 +44,9 @@ MODULE_DESCRIPTION("Splice two UDP Sockets");
 MODULE_ALIAS_GENL_FAMILY(UDP_SPLICE_GENL_NAME);
 
 struct udp_splice_tuple {
-	__be32			laddr, raddr;
-	__be16			lport, rport;
+	unsigned int	hash;
+	__be32		laddr, raddr;
+	__be16		lport, rport;
 };
 
 struct udp_splice_ep {
@@ -105,16 +106,10 @@ static inline struct udp_splice_entry *udp_splice_ep2entry(
 	return container_of(ep, struct udp_splice_entry, ep[ep->idx]);
 }
 
-static inline unsigned int __udp_splice_hash(__be32 laddr, __be32 raddr,
-		__be16 lport, __be16 rport)
+static inline void udp_splice_hash(struct udp_splice_tuple *tuple)
 {
-	return ntohl(laddr) ^ ntohl(raddr) ^ ntohs(lport) ^ ntohs(rport);
-}
-
-static inline unsigned int udp_splice_hash(const struct udp_splice_tuple *tuple)
-{
-	return __udp_splice_hash(tuple->laddr, tuple->raddr, tuple->lport,
-			tuple->rport);
+	tuple->hash = ntohl(tuple->laddr) ^ ntohl(tuple->raddr) ^
+		ntohs(tuple->lport) ^ ntohs(tuple->rport);
 }
 
 static inline int udp_splice_cmp_tuple(const struct udp_splice_tuple *tuple,
@@ -123,14 +118,13 @@ static inline int udp_splice_cmp_tuple(const struct udp_splice_tuple *tuple,
 	return memcmp(tuple, tuple2, sizeof(*tuple));
 }
 
-static void ____udp_splice_insert_ep(struct udp_splice_ep *ep,
-		unsigned int hash, struct rb_root *hash_table,
-		unsigned int hash_table_size)
+static void __udp_splice_insert_ep(struct udp_splice_ep *ep,
+		struct rb_root *hash_table, unsigned int hash_table_size)
 {
 	struct rb_node **new, *parent = NULL;
 	struct rb_root *root;
 
-	root = &hash_table[hash % hash_table_size];
+	root = &hash_table[ep->tuple.hash % hash_table_size];
 	new = &root->rb_node;
 	while (*new) {
 		struct udp_splice_ep *this;
@@ -151,23 +145,16 @@ static void ____udp_splice_insert_ep(struct udp_splice_ep *ep,
 	rb_insert_color(&ep->node, root);
 }
 
-static void __udp_splice_insert_ep(struct udp_splice_ep *ep, unsigned int hash)
+static void udp_splice_insert_ep(struct udp_splice_ep *ep)
 {
-	return ____udp_splice_insert_ep(ep, hash, udp_splice_hash_table,
+	__udp_splice_insert_ep(ep, udp_splice_hash_table,
 			udp_splice_hash_table_size);
-}
-
-static void udp_splice_insert_ep(struct udp_splice_ep *ep,
-		struct rb_root *hash_table, unsigned int hash_table_size)
-{
-	____udp_splice_insert_ep(ep, udp_splice_hash(&ep->tuple),
-			hash_table, hash_table_size);
 }
 
 static inline void __udp_splice_unlink_entry(struct udp_splice_entry *entry)
 {
-	rb_erase(&entry->ep[0].node, &udp_splice_hash_table[udp_splice_hash(&entry->ep[0].tuple) % udp_splice_hash_table_size]);
-	rb_erase(&entry->ep[1].node, &udp_splice_hash_table[udp_splice_hash(&entry->ep[1].tuple) % udp_splice_hash_table_size]);
+	rb_erase(&entry->ep[0].node, &udp_splice_hash_table[entry->ep[0].tuple.hash % udp_splice_hash_table_size]);
+	rb_erase(&entry->ep[1].node, &udp_splice_hash_table[entry->ep[1].tuple.hash % udp_splice_hash_table_size]);
 }
 
 static int udp_splice_set_hash_table_size(const char *val,
@@ -202,10 +189,10 @@ static int udp_splice_set_hash_table_size(const char *val,
 						node);
 				entry = udp_splice_ep2entry(ep);
 				__udp_splice_unlink_entry(entry);
-				udp_splice_insert_ep(&entry->ep[0], hash_table,
-						hash_table_size);
-				udp_splice_insert_ep(&entry->ep[1], hash_table,
-						hash_table_size);
+				__udp_splice_insert_ep(&entry->ep[0],
+						hash_table, hash_table_size);
+				__udp_splice_insert_ep(&entry->ep[1],
+						hash_table, hash_table_size);
 			}
 		}
 		swap(hash_table, udp_splice_hash_table);
@@ -252,7 +239,7 @@ MODULE_PARM_DESC(default_timeout,
 
 static struct nf_hook_ops udp_splice_hook_ops __read_mostly;
 
-static struct udp_splice_ep *__udp_splice_find_ep(unsigned int hash,
+static struct udp_splice_ep *__udp_splice_find_ep(
 		const struct udp_splice_tuple *tuple)
 {
 	struct udp_splice_ep *ep;
@@ -260,7 +247,7 @@ static struct udp_splice_ep *__udp_splice_find_ep(unsigned int hash,
 	struct rb_node *node;
 	int rc;
 
-	root = &udp_splice_hash_table[hash % udp_splice_hash_table_size];
+	root = &udp_splice_hash_table[tuple->hash % udp_splice_hash_table_size];
 	node = root->rb_node;
 	while (node) {
 		ep = rb_entry(node, struct udp_splice_ep, node);
@@ -276,29 +263,14 @@ static struct udp_splice_ep *__udp_splice_find_ep(unsigned int hash,
 	return NULL;
 }
 
-static struct udp_splice_ep *____udp_splice_find_ep(unsigned int hash,
-		__be32 laddr, __be32 raddr, __be16 lport, __be16 rport)
+static struct udp_splice_entry *udp_splice_find_entry(
+		const struct udp_splice_tuple *tuple, int *idx)
 {
-	struct udp_splice_tuple tuple = {
-		.laddr	= laddr,
-		.raddr	= raddr,
-		.lport	= lport,
-		.rport	= rport,
-	};
-
-	return __udp_splice_find_ep(hash, &tuple);
-}
-
-static struct udp_splice_entry *udp_splice_find_entry(__be32 laddr,
-		__be32 raddr, __be16 lport, __be16 rport, int *idx)
-{
-	unsigned int hash;
 	struct udp_splice_ep *ep;
 	struct udp_splice_entry *entry = NULL;
 
-	hash = __udp_splice_hash(laddr, raddr, lport, rport);
 	spin_lock_bh(&udp_splice_hash_table_lock);
-	ep = ____udp_splice_find_ep(hash, laddr, raddr, lport, rport);
+	ep = __udp_splice_find_ep(tuple);
 	if (ep) {
 		entry = udp_splice_ep2entry(ep);
 		atomic_inc(&entry->ref);
@@ -405,6 +377,7 @@ static int udp_splice_get_tuple(struct udp_splice_tuple *tuple, u32 sock)
 	}
 	tuple->raddr = addr.sin_addr.s_addr;
 	tuple->rport = addr.sin_port;
+	udp_splice_hash(tuple);
 err:
 	return retval;
 }
@@ -433,7 +406,6 @@ static int udp_splice_cmd_add(struct sk_buff *skb, struct genl_info *info)
 {
 	struct udp_splice_tuple tuple, tuple2;
 	int retval;
-	unsigned int hash, hash2;
 	struct udp_splice_entry *entry;
 	u32 sock, sock2;
 
@@ -487,17 +459,14 @@ static int udp_splice_cmd_add(struct sk_buff *skb, struct genl_info *info)
 		entry->timeout = udp_splice_default_timeout;
 	entry->timeout *= HZ;
 
-	hash = udp_splice_hash(&tuple);
-	hash2 = udp_splice_hash(&tuple2);
 	spin_lock_bh(&udp_splice_hash_table_lock);
-	if (__udp_splice_find_ep(hash, &tuple) ||
-	    __udp_splice_find_ep(hash2, &tuple2)) {
+	if (__udp_splice_find_ep(&tuple) || __udp_splice_find_ep(&tuple2)) {
 		retval = -EEXIST;
 		goto err2;
 	}
 	atomic_set(&entry->ref, 1);
-	__udp_splice_insert_ep(&entry->ep[0], hash);
-	__udp_splice_insert_ep(&entry->ep[1], hash2);
+	udp_splice_insert_ep(&entry->ep[0]);
+	udp_splice_insert_ep(&entry->ep[1]);
 	entry->last_used = jiffies;
 	entry->timer.expires = entry->last_used + entry->timeout;
 	add_timer(&entry->timer);
@@ -536,7 +505,6 @@ static int udp_splice_cmd_delete(struct sk_buff *skb, struct genl_info *info)
 	int retval;
 	struct udp_splice_ep *ep;
 	struct udp_splice_entry *entry = NULL;
-	unsigned int hash;
 
 	if (current->nsproxy->net_ns != &init_net) {
 		retval = -EOPNOTSUPP;
@@ -546,9 +514,8 @@ static int udp_splice_cmd_delete(struct sk_buff *skb, struct genl_info *info)
 	retval = udp_splice_get_tuple_from_genl(&tuple, info);
 	if (retval)
 		goto err;
-	hash = udp_splice_hash(&tuple);
 	spin_lock_bh(&udp_splice_hash_table_lock);
-	ep = __udp_splice_find_ep(hash, &tuple);
+	ep = __udp_splice_find_ep(&tuple);
 	if (ep) {
 		entry = udp_splice_ep2entry(ep);
 		atomic_inc(&entry->ref);
@@ -572,7 +539,6 @@ static int udp_splice_cmd_get(struct sk_buff *skb, struct genl_info *info)
 {
 	struct udp_splice_tuple tuple;
 	int retval;
-	unsigned int hash;
 
 	if (current->nsproxy->net_ns != &init_net) {
 		retval = -EOPNOTSUPP;
@@ -582,9 +548,8 @@ static int udp_splice_cmd_get(struct sk_buff *skb, struct genl_info *info)
 	retval = udp_splice_get_tuple_from_genl(&tuple, info);
 	if (retval)
 		goto err;
-	hash = udp_splice_hash(&tuple);
 	spin_lock_bh(&udp_splice_hash_table_lock);
-	if (__udp_splice_find_ep(hash, &tuple))
+	if (__udp_splice_find_ep(&tuple))
 		retval = 0;
 	else
 		retval = -ENOENT;
@@ -649,6 +614,7 @@ static unsigned int udp_splice_hook(
 	struct udphdr *udph, _udph;
 	struct udp_splice_entry *entry;
 	struct udp_splice_ep *ep;
+	struct udp_splice_tuple tuple;
 	int idx;
 
 	if (!in || !net_eq(dev_net(in), &init_net))
@@ -681,8 +647,12 @@ static unsigned int udp_splice_hook(
 			goto accept;
 	}
 
-	entry = udp_splice_find_entry(iph->daddr, iph->saddr,
-			udph->dest, udph->source, &idx);
+	tuple.laddr = iph->daddr;
+	tuple.raddr = iph->saddr;
+	tuple.lport = udph->dest;
+	tuple.rport = udph->source;
+	udp_splice_hash(&tuple);
+	entry = udp_splice_find_entry(&tuple, &idx);
 	if (!entry)
 		goto accept;
 	ep = &entry->ep[!idx];
