@@ -1040,8 +1040,10 @@ static int __init init(void)
 		goto err3;
 
 	udp_splice_urelease_wq = alloc_workqueue("udp_splice_urelease", 0, 1);
-	if (!udp_splice_urelease_wq)
+	if (!udp_splice_urelease_wq) {
+		retval = -ENOMEM;
 		goto err4;
+	}
 	BUG_ON(netlink_register_notifier(&nl_notifier));
 
 	retval = genl_register_family_with_ops(&udp_splice_family,
