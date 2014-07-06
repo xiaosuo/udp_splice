@@ -1046,8 +1046,13 @@ static int __init init(void)
 	}
 	BUG_ON(netlink_register_notifier(&nl_notifier));
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
+	retval = genl_register_family_with_ops(&udp_splice_family,
+			udp_splice_ops);
+#else
 	retval = genl_register_family_with_ops(&udp_splice_family,
 			udp_splice_ops, ARRAY_SIZE(udp_splice_ops));
+#endif
 	if (retval)
 		goto err5;
 
