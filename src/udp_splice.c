@@ -703,10 +703,7 @@ static unsigned int udp_splice_hook(
 	secpath_put(skb->sp);
 	skb->sp = NULL;
 #endif
-	if (skb->destructor) {
-		skb->destructor(skb);
-		skb->destructor = NULL;
-	}
+	skb_orphan(skb);
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	nf_conntrack_put(skb->nfct);
 	skb->nfct = NULL;
