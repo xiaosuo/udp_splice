@@ -298,6 +298,21 @@ static struct genl_family udp_splice_family = {
 /* Copied from linux. */
 static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+	struct fd f = fdget(fd);
+	struct socket *sock;
+
+	*err = -EBADF;
+	if (f.file) {
+		sock = sock_from_file(f.file, err);
+		if (likely(sock)) {
+			*fput_needed = f.flags;
+			return sock;
+		}
+		fdput(f);
+	}
+	return NULL;
+#else
 	struct file *file;
 	struct socket *sock;
 
@@ -310,6 +325,7 @@ static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed)
 		fput_light(file, *fput_needed);
 	}
 	return NULL;
+#endif
 }
 
 /* Copied from sys_getsockname */
