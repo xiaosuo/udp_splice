@@ -30,6 +30,7 @@
 #include <linux/syscalls.h>
 #include <linux/file.h>
 #include <linux/proc_fs.h>
+#include <linux/vmalloc.h>
 
 #include <linux/netfilter_ipv4.h>
 
@@ -617,15 +618,39 @@ static void udp_splice_register_hook(struct work_struct *w)
 
 static DECLARE_WORK(udp_splice_register_hook_work, udp_splice_register_hook);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+static nf_hookfn *last_hookfn(const struct nf_hook_state *state) {
+	struct nf_hook_entry *entry;
+	nf_hookfn *hookfn = NULL;
+
+	for (entry = rcu_dereference(state->hook_entries);
+	     entry;
+	     entry = rcu_dereference(entry->next)) {
+		hookfn = entry->ops.hook;
+	}
+
+	return hookfn;
+}
+#endif
+
 static unsigned int udp_splice_hook(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+		void *priv, struct sk_buff *skb,
+		const struct nf_hook_state *state
+#else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
 		const struct nf_hook_ops *ops,
 #else
 		unsigned int hooknum,
 #endif
 		struct sk_buff *skb, const struct net_device *in,
-		const struct net_device *out, int (*okfn)(struct sk_buff *))
+		const struct net_device *out, int (*okfn)(struct sk_buff *)
+#endif
+		)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+	const struct net_device *in = state->in;
+#endif
 	struct iphdr *iph, _iph;
 	struct udphdr *udph, _udph;
 	struct udp_splice_entry *entry;
@@ -639,7 +664,14 @@ static unsigned int udp_splice_hook(
 	if (skb_shared(skb))
 		goto accept;
 
-	if (udp_splice_hook_ops.list.next != &nf_hooks[NFPROTO_IPV4][NF_INET_LOCAL_IN]) {
+	if (
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+	    last_hookfn(state) != udp_splice_hook
+#else
+	    udp_splice_hook_ops.list.next != &nf_hooks[NFPROTO_IPV4][NF_INET_LOCAL_IN]
+#endif
+	) {
+
 		schedule_work(&udp_splice_register_hook_work);
 		goto accept;
 	}
@@ -735,9 +767,9 @@ static unsigned int udp_splice_hook(
 #endif
 #endif
 
-	if (ip_route_me_harder(skb, RTN_UNSPEC))
+	if (ip_route_me_harder(state->net, skb, RTN_UNSPEC))
 		goto drop;
-	ip_local_out(skb);
+	ip_local_out(state->net, state->sk, skb);
 
 	return NF_STOLEN;
 accept2:
@@ -752,7 +784,9 @@ drop:
 
 static struct nf_hook_ops udp_splice_hook_ops __read_mostly = {
 	.hook		= udp_splice_hook,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 	.owner		= THIS_MODULE,
+#endif
 	.pf		= NFPROTO_IPV4,
 	.hooknum	= NF_INET_LOCAL_IN,
 	.priority	= NF_IP_PRI_LAST,
