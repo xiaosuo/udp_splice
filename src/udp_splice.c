@@ -344,7 +344,7 @@ static int udp_splice_get_name(int socket, struct sockaddr *addr, int *plen,
 	if (!sock->sk || sock->sk->sk_protocol != IPPROTO_UDP ||
 	    sock->sk->sk_state != TCP_ESTABLISHED) {
 		error = -EINVAL;
-		goto out;
+		goto out_put;
 	}
 
 	/**
