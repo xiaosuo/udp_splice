@@ -767,9 +767,17 @@ static unsigned int udp_splice_hook(
 #endif
 #endif
 
-	if (ip_route_me_harder(state->net, skb, RTN_UNSPEC))
+	if (ip_route_me_harder(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+			       state->net,
+#endif
+			       skb, RTN_UNSPEC))
 		goto drop;
-	ip_local_out(state->net, state->sk, skb);
+	ip_local_out(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+		     state->net, state->sk,
+#endif
+		     skb);
 
 	return NF_STOLEN;
 accept2:
